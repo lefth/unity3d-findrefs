@@ -15,6 +15,7 @@ namespace findrefs
 	{
 		readonly public bool m_IsScript;
 		readonly public string m_Guid;
+		readonly public bool m_IsAssetBundle;
 		readonly public string m_Path;
 
 		public ReferentAsset(string searchString)
@@ -34,7 +35,7 @@ namespace findrefs
 			var extension = Path.GetExtension(m_Path).ToLower();
 			m_IsScript = extension == ".cs" || extension == ".js";
 
-			m_Guid = GetGuid(m_Path);
+			GetMetadata(m_Path, out m_Guid, out m_IsAssetBundle);
 		}
 
 		public static string FindMatchingFilename(string searchString, string searchDir)
@@ -83,20 +84,29 @@ namespace findrefs
 			return bestMatch;
 		}
 
-		private static string GetGuid(string assetPath)
+		private static void GetMetadata(string assetPath, out string guid, out bool isAssetBundle)
 		{
+			const string assetBundlePrefix = "  assetBundleName: ";
+			const int assetBundlePrefixLength = 19;
+
+			guid = null;
+			isAssetBundle = false;
+
 			using (var fstream = File.OpenRead(assetPath + ".meta"))
 			using (var reader = new StreamReader(fstream))
 			{
 				while (!reader.EndOfStream)
 				{
 					var line = reader.ReadLine();
-					if (line.StartsWith("guid: "))
-						return line.Substring("guid: ".Length);
+					if (guid == null && line.StartsWith("guid: "))
+						guid = line.Substring("guid: ".Length);
+					else if (!isAssetBundle && line.StartsWith(assetBundlePrefix) && line.Length > assetBundlePrefixLength)
+						isAssetBundle = true;
 				}
 			}
 
-			throw new Exception("GUID not found for .meta for asset: " + assetPath);
+			if (guid == null)
+				throw new Exception("GUID not found for .meta for asset: " + assetPath);
 		}
 	}
 
@@ -109,6 +119,9 @@ namespace findrefs
 		public bool _absolute { set { absolute = value; } }
 		[Option("absolute")]
 		public bool absolute { get; set; }
+		//[Option("print-referrers")]
+		[Option("verbose", HelpText = "Print which file refers to which referent.")]
+		public bool printReferrers { get; set; }
 		[Option("print-unreferenced")]
 		public bool printUnreferenced { get; set; }
 		[Option("unreferenced")]
@@ -131,6 +144,7 @@ namespace findrefs
 		private static object m_WriteLock = new object();
 		private static bool m_RelativeOutput;
 		private static bool m_PrintUnreferenced;
+		private static bool m_PrintReferrers;
 		private static bool m_AsResourcesOnly;
 		public static string m_AssetsDir { get; private set; }
 		// Optimization: look for .cs/.js files in one directory first
@@ -147,6 +161,7 @@ namespace findrefs
 				{
 					m_RelativeOutput = !o.absolute;
 					m_PrintUnreferenced = o.printUnreferenced;
+					m_PrintReferrers = o.printReferrers;
 					m_AsResourcesOnly = o.asResourcesOnly;
 					m_SearchBinaries = o.searchBinaryAlso;
 					_searchStrings = o.input;
@@ -161,7 +176,7 @@ namespace findrefs
 						Console.WriteLine(error);
 					Environment.Exit(1);
 				});
-			
+
 			FindReferencesAsync(_searchStrings).Wait();
 		}
 #endif
@@ -231,7 +246,7 @@ namespace findrefs
 				Console.WriteLine();
 
 				var tasks = new List<Task>();
-				
+
 				foreach (var filePath in searchFiles)
 				{
 					var extension = Path.GetExtension(filePath);
@@ -243,8 +258,8 @@ namespace findrefs
 			}
 
 			var resources = referents
-				.Where(s => Path.GetFullPath(s.m_Path).Contains("Resources"));
-			
+				.Where(referent => referent.m_IsAssetBundle || Path.GetFullPath(referent.m_Path).Contains("Resources"));
+
 			if (resources.Any())
 				await FindAsResources(resources, searchFiles, extensions, successfulSearches).ConfigureAwait(false);
 
@@ -282,7 +297,10 @@ namespace findrefs
 					{
 						lock (successfulSearches)
 							successfulSearches.Add(new KeyValuePair<string, ReferentAsset>(filePath, referents[i]));
-						PrintPath(filePath);
+						if (m_PrintReferrers)
+							PrintPath(filePath, "", referents[i].m_Path);
+						else
+							PrintPath(filePath, "");
 						//return; // NOTE: don't break, because a file can match more than one resource
 					}
 				}
@@ -294,24 +312,44 @@ namespace findrefs
 			return Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories);
 		}
 
-		static public void PrintPath(string path, string prefix = "")
+		static public void PrintPath(string path, string prefix = "", string referent = null)
 		{
-			if (m_RelativeOutput && Path.IsPathRooted(path))
-				path = Path.GetRelativePath(Directory.GetCurrentDirectory(), path);
+			if (m_RelativeOutput)
+			{
+#if !UNITY // unity doesn't have Path.GetRelativePath()
+				if (Path.IsPathRooted(path))
+					path = Path.GetRelativePath(Directory.GetCurrentDirectory(), path);
+				if (referent != null && Path.IsPathRooted(referent))
+					referent = Path.GetRelativePath(Directory.GetCurrentDirectory(), referent);
+#endif
+			}
 			else
+			{
 				path = Path.GetFullPath(path);
+				if (referent != null)
+					referent = Path.GetFullPath(referent);
+			}
+
+			path = path.Replace('\\', '/');
+			if (referent != null)
+				referent = referent.Replace('\\', '/');
 
 			lock (m_WriteLock)
 			{
-				Console.WriteLine(prefix + path.Replace('\\', '/'));
+				if (referent == null)
+					Console.WriteLine(prefix + path);
+				else
+					Console.WriteLine(prefix + path + "\n\tRefers to: " + referent);
 			}
 		}
 
+		// FIXME: This will need changes to find by addressable assets.
+		//        The address will need to be part of the referent data.
 		public static async Task FindAsResources(IEnumerable<ReferentAsset> resources, IEnumerable<string> filesToSearch, IList<string> extensions, List<KeyValuePair<string, ReferentAsset>> successfulSearches)
 		{
 			Console.WriteLine("\n");
 			foreach (var resource in resources)
-				Console.WriteLine(Path.GetFileName(resource.m_Path) + " is in Resources/, so also searching for references by name.");
+				Console.WriteLine(Path.GetFileName(resource.m_Path) + " is in Resources/ or an asset bundle, so also searching for references by name.");
 
 			List<string> nameWithoutExt = resources
 				.Select(r => Path.GetFileNameWithoutExtension(r.m_Path))
