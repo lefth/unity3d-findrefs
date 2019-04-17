@@ -194,11 +194,26 @@ namespace findrefs
 			m_ScriptsDir = Path.Combine(m_AssetsDir, "Scripts");
 		}
 
+		/// <summary>
+		/// Get the list of files in a directory, or get a single file if a file is passed.
+		/// </summary>
+		/// <param name="path">A file or folder</param>
+		/// <returns></returns>
+		static IEnumerable<string> GetFileList(string path)
+		{
+			if (Directory.Exists(path))
+				return Directory.EnumerateFiles(path, "*", new EnumerationOptions() { RecurseSubdirectories = true });
+			else
+				return new[] { path };
+		}
+
 		static async Task<List<KeyValuePair<string, ReferentAsset>>> FindReferencesAsync(IEnumerable<string> _searchStrings)
 		{
 			Init();
 
-            _searchStrings = _searchStrings.Where(path => !path.EndsWith(".meta"));
+			// Allow directories to be passed (and explore them recursively):
+			_searchStrings = _searchStrings.SelectMany(GetFileList);
+			_searchStrings = _searchStrings.Where(path => !path.EndsWith(".meta"));
 
 			var searchFiles = m_LimitedFilesToSearch ?? Find(m_AssetsDir);
 
