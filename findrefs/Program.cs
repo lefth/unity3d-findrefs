@@ -38,6 +38,14 @@ namespace findrefs
 			GetMetadata(m_Path, out m_Guid, out m_IsAssetBundle);
 		}
 
+		public ReferentAsset(ReferentAsset original)
+		{
+			m_Guid = original.m_Guid;
+			m_IsAssetBundle = original.m_IsAssetBundle;
+			m_IsScript = original.m_IsScript;
+			m_Path = original.m_Path;
+		}
+
 		public static string FindMatchingFilename(string searchString, string searchDir)
 		{
 			string lcSearch = searchString.ToLower();
@@ -108,6 +116,19 @@ namespace findrefs
 			if (guid == null)
 				throw new Exception("GUID not found for .meta for asset: " + assetPath);
 		}
+
+		public bool Matches(ReferentAsset referent)
+		{
+			return referent.m_Path == m_Path;
+		}
+	}
+	class ReferentAssetWithBasename : ReferentAsset
+	{
+		public readonly string m_Basename;
+		public ReferentAssetWithBasename(ReferentAsset asset, string basename) : base(asset)
+		{
+			m_Basename = basename;
+		}
 	}
 
 #if !UNITY
@@ -122,6 +143,8 @@ namespace findrefs
 		//[Option("print-referrers")]
 		[Option("verbose", HelpText = "Print which file refers to which referent.")]
 		public bool printReferrers { get; set; }
+		[Option("first-reference-only", HelpText = "Optimization: print only the first reference.")]
+		public bool firstReferenceOnly { get; set; }
 		[Option("print-unreferenced")]
 		public bool printUnreferenced { get; set; }
 		[Option("unreferenced")]
@@ -145,6 +168,7 @@ namespace findrefs
 		private static bool m_RelativeOutput;
 		private static bool m_PrintUnreferenced;
 		private static bool m_PrintReferrers;
+		private static bool m_FirstReferenceOnly;
 		private static bool m_AsResourcesOnly;
 		public static string m_AssetsDir { get; private set; }
 		// Optimization: look for .cs/.js files in one directory first
@@ -162,6 +186,7 @@ namespace findrefs
 					m_RelativeOutput = !o.absolute;
 					m_PrintUnreferenced = o.printUnreferenced;
 					m_PrintReferrers = o.printReferrers;
+					m_FirstReferenceOnly = o.firstReferenceOnly;
 					m_AsResourcesOnly = o.asResourcesOnly;
 					m_SearchBinaries = o.searchBinaryAlso;
 					_searchStrings = o.input;
@@ -227,7 +252,6 @@ namespace findrefs
 			}
 			catch (NotFoundException ex)
 			{
-				//throw new Exception("Not found: " + searchString.m_Path);
 				Console.WriteLine("Not found: " + ex.searchString);
 				Environment.Exit(2);
 			}
@@ -259,6 +283,7 @@ namespace findrefs
 			if (!m_AsResourcesOnly)
 			{
 				Console.WriteLine();
+				Console.WriteLine("Finding (not just as resources)");
 
 				var tasks = new List<Task>();
 
@@ -268,12 +293,10 @@ namespace findrefs
 					if (extensions.Any(ext => ext.Equals(extension)))
 						tasks.Add(FindGuidsInFileAsync(filePath, referents, successfulSearches));
 				}
-
 				await Task.WhenAll(tasks);
 			}
 
-			var resources = referents
-				.Where(referent => referent.m_IsAssetBundle || Path.GetFullPath(referent.m_Path).Contains("Resources"));
+			var resources = referents.Where(IsAssetBundleOrResource).ToList();
 
 			if (resources.Any())
 				await FindAsResources(resources, searchFiles, extensions, successfulSearches).ConfigureAwait(false);
@@ -283,7 +306,7 @@ namespace findrefs
 				Console.WriteLine();
 				foreach (var referent in referents)
 				{
-					if (!successfulSearches.Any(kvp => kvp.Value == referent))
+					if (referent != null && !successfulSearches.Any(kvp => kvp.Value.Matches(referent)))
 					{
 						if (m_AsResourcesOnly)
 							PrintPath(referent.m_Path, "UNREFERENCED as resource: ");
@@ -298,25 +321,64 @@ namespace findrefs
 			return successfulSearches;
 		}
 
+		private static bool IsAssetBundleOrResource(ReferentAsset referent)
+		{
+			if (referent != null)
+			{
+				if (referent.m_IsAssetBundle)
+					return true;
+				string[] pathParts =
+					Path.GetFullPath(referent.m_Path).Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar });
+				if (pathParts.Contains("Resources") || pathParts.Contains("Editor Default Resources"))
+					return true;
+			}
+
+			return false;
+		}
+
 		static public async Task FindGuidsInFileAsync(string filePath, List<ReferentAsset> referents, List<KeyValuePair<string, ReferentAsset>> successfulSearches)
 		{
+			if (m_FirstReferenceOnly)
+			{
+				// Delay before reading the file, and stop early if there is nothing to search for.
+				// This happens when we are looking to find only the first referrer to each referent.
+				await Task.Yield();
+				int count = referents.Count;
+				for (int i = 0; i < count; ++i) // don't use "referents.Any" because we aren't locking
+					if (referents[i] != null)
+						goto BODY;
+				return;
+			}
+			BODY:
+
 			using (var fstream = File.OpenRead(filePath))
 			using (var reader = new StreamReader(fstream))
 			{
 				var data = await reader.ReadToEndAsync().ConfigureAwait(false);
-				for (int i = 0; i < referents.Count; ++i)
+				for (int i=0; i<referents.Count; ++i)
 				{
-					var guid = referents[i].m_Guid;
+					var referent = referents[i];
+					if (referent == null)
+						continue;
+
+					string guid = referent.m_Guid;
 					//Console.WriteLine("checking if "+filePath+" contains "+guid);
-					if (data.Contains(guid) && filePath != referents[i].m_Path)
+					if (data.Contains(guid) && filePath != referent.m_Path)
 					{
 						lock (successfulSearches)
-							successfulSearches.Add(new KeyValuePair<string, ReferentAsset>(filePath, referents[i]));
+							successfulSearches.Add(new KeyValuePair<string, ReferentAsset>(filePath, referent));
 						if (m_PrintReferrers)
-							PrintPath(filePath, "", referents[i].m_Path);
+							PrintPath(filePath, "", referent.m_Path);
 						else
 							PrintPath(filePath, "");
-						//return; // NOTE: don't break, because a file can match more than one resource
+
+						if (m_FirstReferenceOnly)
+						{
+							lock (referents)
+							{
+								referents[i] = null;
+							}
+						}
 					}
 				}
 			}
@@ -360,15 +422,17 @@ namespace findrefs
 
 		// FIXME: This will need changes to find by addressable assets.
 		//        The address will need to be part of the referent data.
-		public static async Task FindAsResources(IEnumerable<ReferentAsset> resources, IEnumerable<string> filesToSearch, IList<string> extensions, List<KeyValuePair<string, ReferentAsset>> successfulSearches)
+		public static async Task FindAsResources(List<ReferentAsset> _resources, IEnumerable<string> filesToSearch, IList<string> extensions, List<KeyValuePair<string, ReferentAsset>> successfulSearches)
 		{
 			Console.WriteLine("\n");
-			foreach (var resource in resources)
-				Console.WriteLine(Path.GetFileName(resource.m_Path) + " is in Resources/ or an asset bundle, so also searching for references by name.");
 
-			List<string> nameWithoutExt = resources
-				.Select(r => Path.GetFileNameWithoutExtension(r.m_Path))
-				.ToList();
+			List<ReferentAssetWithBasename> resources = new List<ReferentAssetWithBasename>();
+			foreach (var r in _resources)
+			{
+				Console.WriteLine(Path.GetFileName(r.m_Path) + " is in Resources/ or an asset bundle, so also searching for references by name.");
+				string basename = Path.GetFileNameWithoutExtension(r.m_Path);
+				resources.Add(new ReferentAssetWithBasename(r, basename));
+			}
 
 			Console.WriteLine();
 
@@ -377,33 +441,56 @@ namespace findrefs
 			{
 				var extension = Path.GetExtension(fileToSearch);
 				if (extensions.Any(ext => ext.Equals(extension)))
-					tasks.Add(FindAsResourcesAsync(fileToSearch, resources, nameWithoutExt, successfulSearches));
+					tasks.Add(FindAsResourcesAsync(fileToSearch, resources, successfulSearches));
 			}
 			await Task.WhenAll(tasks).ConfigureAwait(false);
 		}
 
-		private static async Task FindAsResourcesAsync(string fileToSearch, IEnumerable<ReferentAsset> referents, List<string> nameWithoutExt, List<KeyValuePair<string, ReferentAsset>> successfulSearches)
+		private static async Task FindAsResourcesAsync(
+			string fileToSearch,
+			List<ReferentAssetWithBasename> referents,
+			List<KeyValuePair<string, ReferentAsset>> successfulSearches)
 		{
+
+			if (m_FirstReferenceOnly)
+			{
+				// Stop early if possible. See comment in FindGuidsInFileAsync().
+				await Task.Yield();
+				int count = referents.Count;
+				for (int i = 0; i < count; ++i)
+					if (referents[i] != null)
+						goto BODY;
+				return;
+			}
+			BODY:
+
 			using (var fstream = File.OpenRead(fileToSearch))
 			using (var reader = new StreamReader(fstream))
 			{
 				string data = await reader.ReadToEndAsync().ConfigureAwait(false);
-				int i = -1;
-				foreach (var referent in referents)
+				for (int i = 0; i < referents.Count; ++i)
 				{
-					++i;
-					string _nameWithoutExt = nameWithoutExt[i];
+					var referent = referents[i];
+					if (referent == null)
+						continue;
+
 					//Console.WriteLine("checking if " + filePath + " contains " + _nameWithoutExt);
-					if (data.Contains(_nameWithoutExt)
+					if (data.Contains(referent.m_Basename)
 						//&& Regex.IsMatch(data, $@"\b{_nameWithoutExt}\b")
 						&& Path.GetFullPath(fileToSearch) != Path.GetFullPath(referent.m_Path))
 					{
 						if (m_PrintUnreferenced)
-							successfulSearches.Add(new KeyValuePair<string, ReferentAsset>(fileToSearch, referent));
-						string basename = Path.GetFileName(referent.m_Path);
-						PrintPath(fileToSearch, "possible match for " + basename + ": ");
-
-						//break; // NOTE: don't break, because a file can match more than one resource
+							lock (successfulSearches)
+								successfulSearches.Add(new KeyValuePair<string, ReferentAsset>(fileToSearch, referent));
+						string filename = Path.GetFileName(referent.m_Path);
+						PrintPath(fileToSearch, "Possible match for " + filename + ": ");
+						if (m_FirstReferenceOnly)
+						{
+							lock (referents)
+							{
+								referents[i] = null;
+							}
+						}
 					}
 				}
 			}
