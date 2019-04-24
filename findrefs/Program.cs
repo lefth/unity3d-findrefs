@@ -243,17 +243,18 @@ namespace findrefs
 			var searchFiles = m_LimitedFilesToSearch ?? Find(m_AssetsDir);
 
 			// Find references to these assets (referent is something that is REFERRED to):
-			List<ReferentAsset> referents = null;
+			ReferentAsset[] referents;
 			try
 			{
 				referents = _searchStrings
 				   .Select(term => new ReferentAsset(term))
-				   .ToList();
+				   .ToArray();
 			}
 			catch (NotFoundException ex)
 			{
 				Console.WriteLine("Not found: " + ex.searchString);
 				Environment.Exit(2);
+				throw; // not actually called, but needed to keep the compiler happy
 			}
 
 			foreach (var referent in referents)
@@ -268,29 +269,30 @@ namespace findrefs
 			// Which path refers to which asset?
 			var successfulSearches = new List<KeyValuePair<string, ReferentAsset>>();
 
-			var extensions =
+			var _extensions =
 				referents.All(s => s.m_IsScript)
 				? new List<string> { ".prefab", ".unity", ".asset" }
 				: new List<string> { ".asset", ".controller", ".mask", ".mat", ".overrideController", ".prefab", ".renderTexture", ".unity", ".xml" };
 
 			if (m_SearchBinaries)
 			{
-				extensions.Add(".dll");
-				extensions.Add(".bin");
-				extensions.Add(".exe"); // unity doesn't use this one
+				_extensions.Add(".dll");
+				_extensions.Add(".bin");
+				_extensions.Add(".exe"); // unity doesn't use this one
 			}
+			string[] extensions = _extensions.ToArray();
 
 			if (!m_AsResourcesOnly)
 			{
 				Console.WriteLine();
-				Console.WriteLine("Finding (not just as resources)");
+				Console.WriteLine("Finding asset references...");
 
 				var tasks = new List<Task>();
 
 				foreach (var filePath in searchFiles)
 				{
 					var extension = Path.GetExtension(filePath);
-					if (extensions.Any(ext => ext.Equals(extension)))
+					if (extensions.Contains(extension))
 						tasks.Add(FindGuidsInFileAsync(filePath, referents, successfulSearches));
 				}
 				await Task.WhenAll(tasks);
@@ -336,26 +338,22 @@ namespace findrefs
 			return false;
 		}
 
-		static public async Task FindGuidsInFileAsync(string filePath, List<ReferentAsset> referents, List<KeyValuePair<string, ReferentAsset>> successfulSearches)
+		static public async Task FindGuidsInFileAsync(string filePath, ReferentAsset[] referents, List<KeyValuePair<string, ReferentAsset>> successfulSearches)
 		{
 			if (m_FirstReferenceOnly)
 			{
 				// Delay before reading the file, and stop early if there is nothing to search for.
 				// This happens when we are looking to find only the first referrer to each referent.
 				await Task.Yield();
-				int count = referents.Count;
-				for (int i = 0; i < count; ++i) // don't use "referents.Any" because we aren't locking
-					if (referents[i] != null)
-						goto BODY;
-				return;
+				if (referents.All(referent => referent == null))
+					return;
 			}
-			BODY:
 
 			using (var fstream = File.OpenRead(filePath))
 			using (var reader = new StreamReader(fstream))
 			{
 				var data = await reader.ReadToEndAsync().ConfigureAwait(false);
-				for (int i=0; i<referents.Count; ++i)
+				for (int i=0; i<referents.Length; ++i)
 				{
 					var referent = referents[i];
 					if (referent == null)
@@ -426,12 +424,13 @@ namespace findrefs
 		{
 			Console.WriteLine("\n");
 
-			List<ReferentAssetWithBasename> resources = new List<ReferentAssetWithBasename>();
-			foreach (var r in _resources)
+			ReferentAssetWithBasename[] resources = new ReferentAssetWithBasename[_resources.Count];
+			for (int i=0; i<_resources.Count; ++i)
 			{
-				Console.WriteLine(Path.GetFileName(r.m_Path) + " is in Resources/ or an asset bundle, so also searching for references by name.");
-				string basename = Path.GetFileNameWithoutExtension(r.m_Path);
-				resources.Add(new ReferentAssetWithBasename(r, basename));
+				var referent = _resources[i];
+				Console.WriteLine(Path.GetFileName(referent.m_Path) + " is in Resources/ or an asset bundle, so also searching for references by name.");
+				string basename = Path.GetFileNameWithoutExtension(referent.m_Path);
+				resources[i] = new ReferentAssetWithBasename(referent, basename);
 			}
 
 			Console.WriteLine();
@@ -440,15 +439,15 @@ namespace findrefs
 			foreach (var fileToSearch in filesToSearch)
 			{
 				var extension = Path.GetExtension(fileToSearch);
-				if (extensions.Any(ext => ext.Equals(extension)))
-					tasks.Add(FindAsResourcesAsync(fileToSearch, resources, successfulSearches));
+				if (extensions.Contains(extension))
+					tasks.Add(FindResourcesInFileAsync(fileToSearch, resources, successfulSearches));
 			}
 			await Task.WhenAll(tasks).ConfigureAwait(false);
 		}
 
-		private static async Task FindAsResourcesAsync(
+		private static async Task FindResourcesInFileAsync(
 			string fileToSearch,
-			List<ReferentAssetWithBasename> referents,
+			ReferentAssetWithBasename[] referents,
 			List<KeyValuePair<string, ReferentAsset>> successfulSearches)
 		{
 
@@ -456,19 +455,15 @@ namespace findrefs
 			{
 				// Stop early if possible. See comment in FindGuidsInFileAsync().
 				await Task.Yield();
-				int count = referents.Count;
-				for (int i = 0; i < count; ++i)
-					if (referents[i] != null)
-						goto BODY;
-				return;
+				if (referents.All(referent => referent == null))
+					return;
 			}
-			BODY:
 
 			using (var fstream = File.OpenRead(fileToSearch))
 			using (var reader = new StreamReader(fstream))
 			{
 				string data = await reader.ReadToEndAsync().ConfigureAwait(false);
-				for (int i = 0; i < referents.Count; ++i)
+				for (int i = 0; i < referents.Length; ++i)
 				{
 					var referent = referents[i];
 					if (referent == null)
