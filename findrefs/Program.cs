@@ -306,6 +306,8 @@ namespace findrefs
 			if (m_PrintUnreferenced)
 			{
 				Console.WriteLine();
+				Array.Sort(referents, (ReferentAsset a, ReferentAsset b) =>
+					(a?.m_Path.CompareTo(b?.m_Path)).GetValueOrDefault());
 				foreach (var referent in referents)
 				{
 					if (referent != null && !successfulSearches.Any(kvp => kvp.Value.Matches(referent)))
