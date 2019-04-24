@@ -252,6 +252,7 @@ namespace findrefs
 			{
 				referents = _searchStrings
 				   .Select(term => new ReferentAsset(term))
+				   .Distinct(new ReferentPathComparer())
 				   .ToArray();
 			}
 			catch (NotFoundException ex)
@@ -514,6 +515,19 @@ namespace findrefs
 			{
 				semaphore.Release();
 			}
+		}
+	}
+
+	internal class ReferentPathComparer : IEqualityComparer<ReferentAsset>
+	{
+		public bool Equals(ReferentAsset x, ReferentAsset y)
+		{
+			return Path.GetFullPath(x.m_Path) == Path.GetFullPath(y.m_Path);
+		}
+
+		public int GetHashCode(ReferentAsset obj)
+		{
+			return Path.GetFullPath(obj.m_Path).GetHashCode();
 		}
 	}
 
