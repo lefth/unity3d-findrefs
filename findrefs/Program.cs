@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.Serialization;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 #if !UNITY
 using CommandLine;
@@ -170,6 +171,8 @@ namespace findrefs
 		private static bool m_PrintReferrers;
 		private static bool m_FirstReferenceOnly;
 		private static bool m_AsResourcesOnly;
+		private static readonly int m_MaxConcurrency = Environment.ProcessorCount - 1;
+
 		public static string m_AssetsDir { get; private set; }
 		// Optimization: look for .cs/.js files in one directory first
 		public static string m_ScriptsDir { get; private set; }
@@ -237,8 +240,9 @@ namespace findrefs
 			Init();
 
 			// Allow directories to be passed (and explore them recursively):
-			_searchStrings = _searchStrings.SelectMany(GetFileList);
-			_searchStrings = _searchStrings.Where(path => !path.EndsWith(".meta"));
+			_searchStrings = _searchStrings
+				.SelectMany(GetFileList)
+				.Where(path => !path.EndsWith(".meta"));
 
 			var searchFiles = m_LimitedFilesToSearch ?? Find(m_AssetsDir);
 
@@ -287,15 +291,15 @@ namespace findrefs
 				Console.WriteLine();
 				Console.WriteLine("Finding asset references...");
 
+				var semaphore = new SemaphoreSlim(initialCount: m_MaxConcurrency);
 				var tasks = new List<Task>();
-
 				foreach (var filePath in searchFiles)
 				{
 					var extension = Path.GetExtension(filePath);
 					if (extensions.Contains(extension))
-						tasks.Add(FindGuidsInFileAsync(filePath, referents, successfulSearches));
+						tasks.Add(FindGuidsInFileAsync(filePath, referents, successfulSearches, semaphore));
 				}
-				await Task.WhenAll(tasks);
+				await Task.WhenAll(tasks).ConfigureAwait(false);
 			}
 
 			var resources = referents.Where(IsAssetBundleOrResource).ToList();
@@ -340,47 +344,58 @@ namespace findrefs
 			return false;
 		}
 
-		static public async Task FindGuidsInFileAsync(string filePath, ReferentAsset[] referents, List<KeyValuePair<string, ReferentAsset>> successfulSearches)
+		static public async Task FindGuidsInFileAsync(
+			string filePath, ReferentAsset[] referents,
+			List<KeyValuePair<string, ReferentAsset>> successfulSearches,
+			SemaphoreSlim semaphore)
 		{
-			if (m_FirstReferenceOnly)
-			{
-				// Delay before reading the file, and stop early if there is nothing to search for.
-				// This happens when we are looking to find only the first referrer to each referent.
-				await Task.Yield();
-				if (referents.All(referent => referent == null))
-					return;
-			}
+			await semaphore.WaitAsync().ConfigureAwait(false);
 
-			using (var fstream = File.OpenRead(filePath))
-			using (var reader = new StreamReader(fstream))
+			try
 			{
-				var data = await reader.ReadToEndAsync().ConfigureAwait(false);
-				for (int i=0; i<referents.Length; ++i)
+				if (m_FirstReferenceOnly)
 				{
-					var referent = referents[i];
-					if (referent == null)
-						continue;
+					// Delay before reading the file, and stop early if there is nothing to search for.
+					// This happens when we are looking to find only the first referrer to each referent.
+					if (referents.All(referent => referent == null))
+						return;
+				}
 
-					string guid = referent.m_Guid;
-					//Console.WriteLine("checking if "+filePath+" contains "+guid);
-					if (data.Contains(guid) && filePath != referent.m_Path)
+				using (var fstream = File.OpenRead(filePath))
+				using (var reader = new StreamReader(fstream))
+				{
+					var data = await reader.ReadToEndAsync().ConfigureAwait(false);
+					for (int i = 0; i < referents.Length; ++i)
 					{
-						lock (successfulSearches)
-							successfulSearches.Add(new KeyValuePair<string, ReferentAsset>(filePath, referent));
-						if (m_PrintReferrers)
-							PrintPath(filePath, "", referent.m_Path);
-						else
-							PrintPath(filePath, "");
+						var referent = referents[i];
+						if (referent == null)
+							continue;
 
-						if (m_FirstReferenceOnly)
+						string guid = referent.m_Guid;
+						//Console.WriteLine("checking if "+filePath+" contains "+guid);
+						if (data.Contains(guid) && filePath != referent.m_Path)
 						{
-							lock (referents)
+							lock (successfulSearches)
+								successfulSearches.Add(new KeyValuePair<string, ReferentAsset>(filePath, referent));
+							if (m_PrintReferrers)
+								PrintPath(filePath, "", referent.m_Path);
+							else
+								PrintPath(filePath, "");
+
+							if (m_FirstReferenceOnly)
 							{
-								referents[i] = null;
+								lock (referents)
+								{
+									referents[i] = null;
+								}
 							}
 						}
 					}
 				}
+			}
+			finally
+			{
+				semaphore.Release();
 			}
 		}
 
@@ -437,12 +452,13 @@ namespace findrefs
 
 			Console.WriteLine();
 
+			var semaphore = new SemaphoreSlim(initialCount: m_MaxConcurrency);
 			var tasks = new List<Task>();
 			foreach (var fileToSearch in filesToSearch)
 			{
 				var extension = Path.GetExtension(fileToSearch);
 				if (extensions.Contains(extension))
-					tasks.Add(FindResourcesInFileAsync(fileToSearch, resources, successfulSearches));
+					tasks.Add(FindResourcesInFileAsync(fileToSearch, resources, successfulSearches, semaphore));
 			}
 			await Task.WhenAll(tasks).ConfigureAwait(false);
 		}
@@ -450,46 +466,53 @@ namespace findrefs
 		private static async Task FindResourcesInFileAsync(
 			string fileToSearch,
 			ReferentAssetWithBasename[] referents,
-			List<KeyValuePair<string, ReferentAsset>> successfulSearches)
+			List<KeyValuePair<string, ReferentAsset>> successfulSearches,
+			SemaphoreSlim semaphore)
 		{
-
-			if (m_FirstReferenceOnly)
+			await semaphore.WaitAsync().ConfigureAwait(false);
+			try
 			{
-				// Stop early if possible. See comment in FindGuidsInFileAsync().
-				await Task.Yield();
-				if (referents.All(referent => referent == null))
-					return;
-			}
-
-			using (var fstream = File.OpenRead(fileToSearch))
-			using (var reader = new StreamReader(fstream))
-			{
-				string data = await reader.ReadToEndAsync().ConfigureAwait(false);
-				for (int i = 0; i < referents.Length; ++i)
+				if (m_FirstReferenceOnly)
 				{
-					var referent = referents[i];
-					if (referent == null)
-						continue;
+					// Stop early if possible. See comment in FindGuidsInFileAsync().
+					if (referents.All(referent => referent == null))
+						return;
+				}
 
-					//Console.WriteLine("checking if " + filePath + " contains " + _nameWithoutExt);
-					if (data.Contains(referent.m_Basename)
-						//&& Regex.IsMatch(data, $@"\b{_nameWithoutExt}\b")
-						&& Path.GetFullPath(fileToSearch) != Path.GetFullPath(referent.m_Path))
+				using (var fstream = File.OpenRead(fileToSearch))
+				using (var reader = new StreamReader(fstream))
+				{
+					string data = await reader.ReadToEndAsync().ConfigureAwait(false);
+					for (int i = 0; i < referents.Length; ++i)
 					{
-						if (m_PrintUnreferenced)
-							lock (successfulSearches)
-								successfulSearches.Add(new KeyValuePair<string, ReferentAsset>(fileToSearch, referent));
-						string filename = Path.GetFileName(referent.m_Path);
-						PrintPath(fileToSearch, "Possible match for " + filename + ": ");
-						if (m_FirstReferenceOnly)
+						var referent = referents[i];
+						if (referent == null)
+							continue;
+
+						//Console.WriteLine("checking if " + filePath + " contains " + _nameWithoutExt);
+						if (data.Contains(referent.m_Basename)
+							//&& Regex.IsMatch(data, $@"\b{_nameWithoutExt}\b")
+							&& Path.GetFullPath(fileToSearch) != Path.GetFullPath(referent.m_Path))
 						{
-							lock (referents)
+							if (m_PrintUnreferenced)
+								lock (successfulSearches)
+									successfulSearches.Add(new KeyValuePair<string, ReferentAsset>(fileToSearch, referent));
+							string filename = Path.GetFileName(referent.m_Path);
+							PrintPath(fileToSearch, "Possible match for " + filename + ": ");
+							if (m_FirstReferenceOnly)
 							{
-								referents[i] = null;
+								lock (referents)
+								{
+									referents[i] = null;
+								}
 							}
 						}
 					}
 				}
+			}
+			finally
+			{
+				semaphore.Release();
 			}
 		}
 	}
