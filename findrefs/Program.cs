@@ -490,21 +490,26 @@ namespace findrefs
 						if (referent == null)
 							continue;
 
-						//Console.WriteLine("checking if " + filePath + " contains " + _nameWithoutExt);
+						//Console.WriteLine($"Checking if {filePath} contains {referent.m_Basename}");
 						if (data.Contains(referent.m_Basename)
-							//&& Regex.IsMatch(data, $@"\b{_nameWithoutExt}\b")
 							&& Path.GetFullPath(fileToSearch) != Path.GetFullPath(referent.m_Path))
 						{
-							if (m_PrintUnreferenced)
-								lock (successfulSearches)
-									successfulSearches.Add(new KeyValuePair<string, ReferentAsset>(fileToSearch, referent));
-							string filename = Path.GetFileName(referent.m_Path);
-							PrintPath(fileToSearch, "Possible match for " + filename + ": ");
-							if (m_FirstReferenceOnly)
+							// It matches, but let's make sure it matches as a distinct word.
+							// (Don't match "foobar" for resource "bar.prefab".)
+							string wholeWordMatch = $@"\b{Regex.Escape(referent.m_Basename)}\b";
+							if (Regex.IsMatch(data, wholeWordMatch))
 							{
-								lock (referents)
+								if (m_PrintUnreferenced)
+									lock (successfulSearches)
+										successfulSearches.Add(new KeyValuePair<string, ReferentAsset>(fileToSearch, referent));
+								string filename = Path.GetFileName(referent.m_Path);
+								PrintPath(fileToSearch, "Possible match for " + filename + ": ");
+								if (m_FirstReferenceOnly)
 								{
-									referents[i] = null;
+									lock (referents)
+									{
+										referents[i] = null;
+									}
 								}
 							}
 						}
