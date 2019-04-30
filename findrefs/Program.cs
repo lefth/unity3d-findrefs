@@ -70,7 +70,7 @@ namespace findrefs
 					if (matchFunc(filePath.ToLower()))
 					{
 						matches[Path.GetFileName(filePath)] = filePath;
-						Program.PrintPath(filePath, "\tMatches:  " + Path.GetFileName(filePath) + "  --  ");
+						Program.PrintPath(filePath, $"\tMatches:  {Path.GetFileName(filePath)}  --  ");
 					}
 				}
 			}
@@ -101,7 +101,7 @@ namespace findrefs
 			guid = null;
 			isAssetBundle = false;
 
-			using (var fstream = File.OpenRead(assetPath + ".meta"))
+			using (var fstream = File.OpenRead($"{assetPath}.meta"))
 			using (var reader = new StreamReader(fstream))
 			{
 				while (!reader.EndOfStream)
@@ -115,7 +115,7 @@ namespace findrefs
 			}
 
 			if (guid == null)
-				throw new Exception("GUID not found for .meta for asset: " + assetPath);
+				throw new Exception($"GUID not found for .meta for asset: {assetPath}");
 		}
 
 		public bool Matches(ReferentAsset referent)
@@ -257,7 +257,7 @@ namespace findrefs
 			}
 			catch (NotFoundException ex)
 			{
-				Console.WriteLine("Not found: " + ex.searchString);
+				Console.WriteLine($"Not found: {ex.searchString}");
 				Environment.Exit(2);
 				throw; // not actually called, but needed to keep the compiler happy
 			}
@@ -373,7 +373,7 @@ namespace findrefs
 							continue;
 
 						string guid = referent.m_Guid;
-						//Console.WriteLine("checking if "+filePath+" contains "+guid);
+						//Console.WriteLine($"Checking if {filePath} contains {guid}");
 						if (data.Contains(guid) && filePath != referent.m_Path)
 						{
 							lock (successfulSearches)
@@ -432,7 +432,7 @@ namespace findrefs
 				if (referent == null)
 					Console.WriteLine(prefix + path);
 				else
-					Console.WriteLine(prefix + path + "\n\tRefers to: " + referent);
+					Console.WriteLine($"{prefix}{path}\n\tRefers to: {referent}");
 			}
 		}
 
@@ -443,10 +443,10 @@ namespace findrefs
 			Console.WriteLine("\n");
 
 			ReferentAssetWithBasename[] resources = new ReferentAssetWithBasename[_resources.Count];
-			for (int i=0; i<_resources.Count; ++i)
+			for (int i = 0; i < _resources.Count; ++i)
 			{
 				var referent = _resources[i];
-				Console.WriteLine(Path.GetFileName(referent.m_Path) + " is in Resources/ or an asset bundle, so also searching for references by name.");
+				Console.WriteLine($"{Path.GetFileName(referent.m_Path)} is in Resources/ or an asset bundle, so also searching for references by name.");
 				string basename = Path.GetFileNameWithoutExtension(referent.m_Path);
 				resources[i] = new ReferentAssetWithBasename(referent, basename);
 			}
@@ -503,7 +503,7 @@ namespace findrefs
 									lock (successfulSearches)
 										successfulSearches.Add(new KeyValuePair<string, ReferentAsset>(fileToSearch, referent));
 								string filename = Path.GetFileName(referent.m_Path);
-								PrintPath(fileToSearch, "Possible match for " + filename + ": ");
+								PrintPath(fileToSearch, $"Possible match for {filename}: ");
 								if (m_FirstReferenceOnly)
 								{
 									lock (referents)
