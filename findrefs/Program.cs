@@ -312,7 +312,7 @@ namespace findrefs
 			{
 				Console.WriteLine();
 				Array.Sort(referents, (ReferentAsset a, ReferentAsset b) =>
-					(a?.m_Path.CompareTo(b?.m_Path)).GetValueOrDefault());
+					string.Compare(a?.m_Path, b?.m_Path));
 				foreach (var referent in referents)
 				{
 					if (referent != null && !successfulSearches.Any(kvp => kvp.Value.Matches(referent)))
